@@ -1,56 +1,49 @@
 import gradio as gr
-import whisper
+from faster_whisper import WhisperModel
 import yt_dlp
 import os
 import subprocess
 
 def process_video(url):
     try:
-        # Очистка места перед работой
+        # Очистка старых файлов
         for f in ["in.mp4", "out.mp4", "s.srt"]:
             if os.path.exists(f): os.remove(f)
 
-        # 1. Скачивание (самое низкое качество, чтобы не забить память)
+        # 1. Скачиваем только звук (это сэкономит кучу памяти!)
         opts = {
-            'format': 'worst[ext=mp4]', 
-            'outtmpl': 'in.mp4',
+            'format': 'bestaudio/best',
+            'outtmpl': 'audio.mp3',
             'overwrites': True
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
+            # Также скачаем видео без звука для склейки
+            ydl.params['format'] = 'worst[ext=mp4]'
+            ydl.params['outtmpl'] = 'in.mp4'
+            ydl.download([url])
 
-        # 2. Загружаем модель ИИ только ВНУТРИ функции и сразу удаляем потом
-        model = whisper.load_model("tiny")
-        result = model.transcribe("in.mp4", language="ru")
+        # 2. ИИ распознавание (самая быстрая и легкая модель)
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe("audio.mp3", beam_size=1)
         
-        # 3. Создаем SRT
+        # 3. Сохраняем субтитры
         with open("s.srt", "w", encoding="utf-8") as f:
-            for i, seg in enumerate(result['segments']):
-                s = seg['start']; e = seg['end']
-                f.write(f"{i+1}\n{int(s//3600):02d}:{int((s%3600)//60):02d}:{int(s%60):02d},000 --> {int(e//3600):02d}:{int((e%3600)//60):02d}:{int(e%60):02d},000\n{seg['text'].strip()}\n\n")
+            for i, seg in enumerate(segments):
+                s = seg.start; e = seg.end
+                f.write(f"{i+1}\n{int(s//3600):02d}:{int((s%3600)//60):02d}:{int(s%60):02d},000 --> {int(e//3600):02d}:{int((e%3600)//60):02d}:{int(e%60):02d},000\n{seg.text.strip()}\n\n")
 
-        # Удаляем модель из памяти сразу после использования
-        del model
-
-        # 4. Вшиваем субтитры (очень медленно, но экономно по памяти)
+        # 4. Вшиваем субтитры через ffmpeg
         subprocess.run([
-            'ffmpeg', '-i', 'in.mp4', 
-            '-vf', 'subtitles=s.srt', 
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35',
-            '-c:a', 'copy', '-y', 'out.mp4'
+            'ffmpeg', '-i', 'in.mp4', '-vf', 'subtitles=s.srt', 
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35', '-y', 'out.mp4'
         ])
         
         return "out.mp4"
     except Exception as e:
+        print(f"Error: {e}")
         return None
 
-# Облегченный интерфейс
-with gr.Blocks() as demo:
-    gr.Markdown("### AI Video Translator (Free Edition)")
-    input_text = gr.Textbox(label="YouTube Link")
-    output_video = gr.Video()
-    btn = gr.Button("Start")
-    btn.click(process_video, inputs=input_text, outputs=output_video)
-
+demo = gr.Interface(fn=process_video, inputs="text", outputs="video", title="Fast Video Translator")
 demo.launch(server_name="0.0.0.0", server_port=10000)
-        
+            
